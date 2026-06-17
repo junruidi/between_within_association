@@ -1,0 +1,809 @@
+---
+title: "Within--Between Decomposition for Repeated-Measure Algorithm Validation"
+author: "Junrui"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+```
+
+# Goal
+
+Suppose we have repeated measurements for two variables:
+
+- $Y_{ij}$: ground truth measurement for subject $i$ at time $j$
+- $X_{ij}$: algorithm prediction of the ground truth for subject $i$ at time $j$
+
+The scientific question is whether the algorithm prediction $X$ tracks the ground truth $Y$ over time.
+
+A key complication is that both $X$ and $Y$ may vary across subjects and within subjects over time. A single pooled association between $X$ and $Y$ can therefore mix two different sources of information:
+
+1. **Between-subject association**: Do subjects with higher average algorithm predictions also have higher average ground truth values?
+2. **Within-subject association**: When a subject's algorithm prediction is higher than their own usual level, is their ground truth also higher?
+
+This distinction is important for avoiding Simpson's paradox, ecological fallacy, or symptom-paradox-type interpretation problems.
+
+# Mathematical setup
+
+For each subject $i$, define the subject-level mean of $X$ as:
+
+$$
+\bar X_i = \frac{1}{n_i}\sum_{j=1}^{n_i} X_{ij}
+$$
+
+and the within-subject deviation as:
+
+$$
+X_{ij} - \bar X_i
+$$
+
+Then $X_{ij}$ can be decomposed as:
+
+$$
+X_{ij} = \bar X_i + (X_{ij} - \bar X_i)
+$$
+
+A within--between mixed model can be written as:
+
+$$
+Y_{ij}
+= \beta_0
++ \beta_B \bar X_i
++ \beta_W (X_{ij} - \bar X_i)
++ \gamma t_{ij}
++ b_i
++ \epsilon_{ij}
+$$
+
+where:
+
+- $\beta_B$ is the **between-subject slope**
+- $\beta_W$ is the **within-subject slope**
+- $t_{ij}$ is time
+- $b_i$ is a subject-level random intercept
+- $\epsilon_{ij}$ is residual error
+
+The between-subject slope answers:
+
+> Do people with higher average algorithm predictions also have higher average ground truth values?
+
+The within-subject slope answers:
+
+> When the same person's algorithm prediction is above their own average, is their ground truth also above their own average?
+
+For algorithm validation, $\beta_W$ is often particularly important because it reflects within-person tracking over time.
+
+# Why standardization is not required for testing $\beta_B = \beta_W$
+
+Although $\bar X_i$ and $X_{ij} - \bar X_i$ often have different variances, they have the same measurement unit.
+
+For example, suppose $X$ is an algorithm-predicted symptom score measured in points. Then:
+
+- $X_{ij}$ is measured in symptom-score points
+- $\bar X_i$ is measured in symptom-score points
+- $X_{ij} - \bar X_i$ is also measured in symptom-score points
+
+Therefore:
+
+$$
+\beta_B = \frac{\text{units of }Y}{\text{one point of }X}
+$$
+
+and:
+
+$$
+\beta_W = \frac{\text{units of }Y}{\text{one point of }X}
+$$
+
+So the contrast:
+
+$$
+H_0: \beta_B - \beta_W = 0
+$$
+
+is meaningful on the original scale.
+
+Standardizing $\bar X_i$ and $X_{ij} - \bar X_i$ separately would answer a different question:
+
+> Is a one-standard-deviation difference in between-subject $X$ associated with the same change in $Y$ as a one-standard-deviation within-subject deviation in $X$?
+
+That can be useful descriptively, but it is not the same as testing whether a single raw-unit pooled slope is justified.
+
+# Pooled model and equality of slopes
+
+The pooled model is:
+
+$$
+Y_{ij}
+= \beta_0
++ \beta X_{ij}
++ \gamma t_{ij}
++ b_i
++ \epsilon_{ij}
+$$
+
+This model implicitly assumes that the between-subject and within-subject slopes are the same:
+
+$$
+\beta_B = \beta_W = \beta
+$$
+
+So before using a pooled model, it is useful to test:
+
+$$
+H_0: \beta_B = \beta_W
+$$
+
+or equivalently:
+
+$$
+H_0: \beta_B - \beta_W = 0
+$$
+
+# Reparameterized model
+
+An algebraically equivalent model is:
+
+$$
+Y_{ij}
+= \beta_0
++ \beta_W X_{ij}
++ \delta \bar X_i
++ \gamma t_{ij}
++ b_i
++ \epsilon_{ij}
+$$
+
+where:
+
+$$
+\delta = \beta_B - \beta_W
+$$
+
+Therefore, testing whether the coefficient of $\bar X_i$ is zero in this reparameterized model is equivalent to testing:
+
+$$
+H_0: \beta_B = \beta_W
+$$
+
+This is usually the cleanest model-based test.
+
+# Simulation setup
+
+We simulate three scenarios:
+
+1. **Opposite direction**: $\beta_B > 0$ and $\beta_W < 0$  
+   This is the textbook Simpson's paradox / symptom paradox case.
+
+2. **Same direction, different size**: $\beta_B > 0$ and $\beta_W > 0$, but $\beta_B \ne \beta_W$  
+   This means the algorithm is directionally consistent, but between-subject and within-subject associations differ materially.
+
+3. **Same direction, similar size**: $\beta_B \approx \beta_W > 0$  
+   This is the case where a pooled model may be more defensible.
+
+# Load packages
+
+```{r packages}
+library(lme4)
+library(lmerTest)
+library(multcomp)
+library(ggplot2)
+library(dplyr)
+library(broom.mixed)
+```
+
+# Simulation function
+
+```{r simulation-function}
+simulate_within_between <- function(
+    n_id = 120,
+    n_time = 6,
+    beta_B = 1.0,
+    beta_W = 1.0,
+    beta_time = 0.2,
+    sigma_subject = 1.0,
+    sigma_error = 1.0,
+    mean_x_sd = 2.0,
+    within_x_sd = 1.0,
+    scenario_name = "scenario"
+) {
+  
+  dat <- expand.grid(
+    id = 1:n_id,
+    time = 0:(n_time - 1)
+  )
+  
+  dat <- dat %>%
+    arrange(id, time)
+  
+  # Subject-level average X: between-subject component
+  x_bar_true <- rnorm(n_id, mean = 0, sd = mean_x_sd)
+  
+  # Subject-level random intercept for Y
+  subject_re <- rnorm(n_id, mean = 0, sd = sigma_subject)
+  
+  dat$x_bar_true <- x_bar_true[dat$id]
+  dat$subject_re <- subject_re[dat$id]
+  
+  # Within-subject deviation of X
+  dat$x_within_true <- rnorm(nrow(dat), mean = 0, sd = within_x_sd)
+  
+  # Observed X
+  dat$x <- dat$x_bar_true + dat$x_within_true
+  
+  # Generate Y using separate between and within slopes
+  dat$y <- 
+    10 +
+    beta_B * dat$x_bar_true +
+    beta_W * dat$x_within_true +
+    beta_time * dat$time +
+    dat$subject_re +
+    rnorm(nrow(dat), mean = 0, sd = sigma_error)
+  
+  # In real data, we usually do not know the true x_bar or true within component.
+  # Therefore, we estimate them empirically from observed X.
+  dat <- dat %>%
+    group_by(id) %>%
+    mutate(
+      x_bar = mean(x),
+      x_within = x - x_bar
+    ) %>%
+    ungroup()
+  
+  dat$scenario <- scenario_name
+  
+  return(dat)
+}
+```
+
+# Model fitting function
+
+```{r fit-models-function}
+fit_models <- function(dat) {
+  
+  # Model A: Explicit within-between decomposition
+  # y = beta_B * x_bar + beta_W * x_within + time + random intercept
+  m_wb <- lmer(
+    y ~ x_bar + x_within + time + (1 | id),
+    data = dat
+  )
+  
+  # Model B: Reparameterized version
+  # y = beta_W * x + delta * x_bar + time + random intercept
+  # where delta = beta_B - beta_W
+  m_reparam <- lmer(
+    y ~ x + x_bar + time + (1 | id),
+    data = dat
+  )
+  
+  # Model C: Pooled model
+  # Assumes beta_B = beta_W
+  m_pooled <- lmer(
+    y ~ x + time + (1 | id),
+    data = dat
+  )
+  
+  list(
+    within_between = m_wb,
+    reparameterized = m_reparam,
+    pooled = m_pooled
+  )
+}
+```
+
+# Summary function
+
+```{r summary-function}
+summarize_results <- function(models, scenario_label) {
+  
+  m_wb <- models$within_between
+  m_reparam <- models$reparameterized
+  m_pooled <- models$pooled
+  
+  wb_coef <- summary(m_wb)$coefficients
+  rep_coef <- summary(m_reparam)$coefficients
+  pooled_coef <- summary(m_pooled)$coefficients
+  
+  beta_B_hat <- wb_coef["x_bar", "Estimate"]
+  beta_W_hat <- wb_coef["x_within", "Estimate"]
+  
+  beta_B_p <- wb_coef["x_bar", "Pr(>|t|)"]
+  beta_W_p <- wb_coef["x_within", "Pr(>|t|)"]
+  
+  # In the reparameterized model:
+  # coefficient of x is beta_W
+  # coefficient of x_bar is beta_B - beta_W
+  beta_W_reparam <- rep_coef["x", "Estimate"]
+  delta_hat <- rep_coef["x_bar", "Estimate"]
+  delta_p <- rep_coef["x_bar", "Pr(>|t|)"]
+  
+  pooled_beta <- pooled_coef["x", "Estimate"]
+  pooled_p <- pooled_coef["x", "Pr(>|t|)"]
+  
+  out <- data.frame(
+    scenario = scenario_label,
+    
+    beta_B_hat_decomposed = beta_B_hat,
+    beta_W_hat_decomposed = beta_W_hat,
+    beta_B_minus_beta_W_from_decomposed = beta_B_hat - beta_W_hat,
+    
+    beta_W_hat_reparameterized = beta_W_reparam,
+    delta_beta_B_minus_beta_W = delta_hat,
+    p_value_test_beta_B_equals_beta_W = delta_p,
+    
+    pooled_beta_hat = pooled_beta,
+    pooled_beta_p_value = pooled_p
+  )
+  
+  return(out)
+}
+```
+
+# Simulate three scenarios
+
+```{r simulate-scenarios}
+set.seed(2026)
+
+# Scenario 1:
+# Simpson's paradox / symptom paradox
+# Between effect is positive, within effect is negative.
+dat1 <- simulate_within_between(
+  beta_B = 1.2,
+  beta_W = -0.8,
+  beta_time = 0.2,
+  scenario_name = "1_opposite_direction"
+)
+
+# Scenario 2:
+# Same direction, but different magnitude.
+dat2 <- simulate_within_between(
+  beta_B = 1.2,
+  beta_W = 0.3,
+  beta_time = 0.2,
+  scenario_name = "2_same_direction_different_size"
+)
+
+# Scenario 3:
+# Same direction, similar magnitude.
+dat3 <- simulate_within_between(
+  beta_B = 0.8,
+  beta_W = 0.75,
+  beta_time = 0.2,
+  scenario_name = "3_same_direction_similar_size"
+)
+```
+
+# Fit models
+
+```{r fit-scenarios}
+models1 <- fit_models(dat1)
+models2 <- fit_models(dat2)
+models3 <- fit_models(dat3)
+```
+
+# Summarize main results
+
+```{r main-results}
+results <- bind_rows(
+  summarize_results(models1, "1_opposite_direction"),
+  summarize_results(models2, "2_same_direction_different_size"),
+  summarize_results(models3, "3_same_direction_similar_size")
+)
+
+print(results)
+```
+
+# Interpretation of model coefficients
+
+For the decomposed model:
+
+```r
+y ~ x_bar + x_within + time + (1 | id)
+```
+
+- `x_bar` estimates $\beta_B$
+- `x_within` estimates $\beta_W$
+
+For the reparameterized model:
+
+```r
+y ~ x + x_bar + time + (1 | id)
+```
+
+- `x` estimates $\beta_W$
+- `x_bar` estimates $\beta_B - \beta_W$
+
+For the pooled model:
+
+```r
+y ~ x + time + (1 | id)
+```
+
+- `x` estimates a single pooled slope, implicitly assuming $\beta_B = \beta_W$
+
+# Inspect model summaries
+
+```{r model-summaries}
+summary(models1$within_between)
+summary(models1$reparameterized)
+summary(models1$pooled)
+
+summary(models2$within_between)
+summary(models2$reparameterized)
+summary(models2$pooled)
+
+summary(models3$within_between)
+summary(models3$reparameterized)
+summary(models3$pooled)
+```
+
+# Contrast test using `glht()`
+
+The decomposed model estimates $\beta_B$ and $\beta_W$ separately. We can use `multcomp::glht()` to test:
+
+$$
+H_0: \beta_B - \beta_W = 0
+$$
+
+In the fitted model, this is:
+
+```r
+x_bar - x_within = 0
+```
+
+```{r glht-function}
+contrast_beta_B_minus_beta_W_glht <- function(model) {
+  
+  # This tests:
+  # H0: beta_B - beta_W = 0
+  #
+  # In the decomposed model:
+  # beta_B = coefficient of x_bar
+  # beta_W = coefficient of x_within
+  
+  glht_result <- glht(
+    model,
+    linfct = c("x_bar - x_within = 0")
+  )
+  
+  return(glht_result)
+}
+```
+
+```{r glht-run}
+glht1 <- contrast_beta_B_minus_beta_W_glht(models1$within_between)
+glht2 <- contrast_beta_B_minus_beta_W_glht(models2$within_between)
+glht3 <- contrast_beta_B_minus_beta_W_glht(models3$within_between)
+
+summary(glht1)
+confint(glht1)
+
+summary(glht2)
+confint(glht2)
+
+summary(glht3)
+confint(glht3)
+```
+
+# Clean table from `glht()` results
+
+```{r glht-table-function}
+extract_glht_contrast <- function(glht_object, scenario_label) {
+  
+  test_sum <- summary(glht_object)
+  ci_sum <- confint(glht_object)
+  
+  out <- data.frame(
+    scenario = scenario_label,
+    contrast = names(test_sum$test$coefficients),
+    estimate_beta_B_minus_beta_W = as.numeric(test_sum$test$coefficients),
+    se = as.numeric(test_sum$test$sigma),
+    z_value = as.numeric(test_sum$test$tstat),
+    p_value = as.numeric(test_sum$test$pvalues),
+    lower_ci = as.numeric(ci_sum$confint[, "lwr"]),
+    upper_ci = as.numeric(ci_sum$confint[, "upr"])
+  )
+  
+  return(out)
+}
+```
+
+```{r glht-table}
+glht_results <- bind_rows(
+  extract_glht_contrast(glht1, "1_opposite_direction"),
+  extract_glht_contrast(glht2, "2_same_direction_different_size"),
+  extract_glht_contrast(glht3, "3_same_direction_similar_size")
+)
+
+print(glht_results)
+```
+
+# Compare `glht()` with reparameterized model
+
+The `glht()` estimate from the decomposed model should match the `x_bar` coefficient from the reparameterized model:
+
+```{r compare-glht-reparam}
+reparam_results <- bind_rows(
+  tidy(models1$reparameterized, effects = "fixed") %>%
+    filter(term == "x_bar") %>%
+    mutate(scenario = "1_opposite_direction"),
+  tidy(models2$reparameterized, effects = "fixed") %>%
+    filter(term == "x_bar") %>%
+    mutate(scenario = "2_same_direction_different_size"),
+  tidy(models3$reparameterized, effects = "fixed") %>%
+    filter(term == "x_bar") %>%
+    mutate(scenario = "3_same_direction_similar_size")
+) %>%
+  select(scenario, term, estimate, std.error, statistic, p.value)
+
+comparison_glht_reparam <- glht_results %>%
+  select(
+    scenario,
+    glht_estimate = estimate_beta_B_minus_beta_W,
+    glht_p_value = p_value
+  ) %>%
+  left_join(
+    reparam_results %>%
+      select(
+        scenario,
+        reparam_estimate = estimate,
+        reparam_p_value = p.value
+      ),
+    by = "scenario"
+  )
+
+print(comparison_glht_reparam)
+```
+
+# Clean pooled-model comparison table
+
+```{r clean-results}
+clean_results <- results %>%
+  mutate(
+    pooling_decision = case_when(
+      abs(delta_beta_B_minus_beta_W) < 0.15 ~ "Pooling likely reasonable",
+      TRUE ~ "Do not pool; slopes differ materially"
+    )
+  )
+print(clean_results)
+```
+
+The threshold of `0.15` above is only an illustrative rule. In a real validation analysis, the threshold for a practically meaningful difference should be defined based on the measurement scale, clinical context, and intended use of the algorithm.
+
+# Plot raw repeated-measure relationship
+
+This plot shows the raw relationship between $X$ and $Y$.
+
+- Thin lines connect repeated measurements within subject.
+- The thick smooth line shows the pooled trend.
+
+```{r raw-plot-function}
+plot_raw_relationship <- function(dat, title_text) {
+  dat %>% mutate(id = as.character(id)) %>%
+  ggplot(., aes(x = x, y = y, group = id, color = id)) +
+    geom_line(alpha = 0.25) +
+    geom_point(alpha = 0.45) +
+    geom_smooth(
+      aes(group = 1),
+      method = "lm",
+      se = FALSE,
+      linewidth = 1.2
+    ) +
+    guides(color = "none") + 
+    labs(
+      title = title_text,
+      subtitle = "Thin lines = within-subject repeated measures; thick line = pooled trend",
+      x = "Algorithm prediction X",
+      y = "Ground truth Y"
+    ) +
+    theme_bw()
+}
+```
+
+```{r raw-plots}
+plot_raw_relationship(dat1, "Scenario 1: Opposite between and within effects")
+plot_raw_relationship(dat2, "Scenario 2: Same direction but different magnitude")
+plot_raw_relationship(dat3, "Scenario 3: Same direction and similar magnitude")
+```
+
+# Plot within-subject relationship
+
+This plot centers both $X$ and $Y$ within each subject.
+
+```{r within-plot-function}
+plot_within_relationship <- function(dat, title_text) {
+  
+  dat <- dat %>%
+    group_by(id) %>%
+    mutate(
+      y_bar = mean(y),
+      y_within = y - y_bar
+    ) %>%
+    ungroup()
+  
+  ggplot(dat, aes(x = x_within, y = y_within)) +
+    geom_point(alpha = 0.45) +
+    geom_smooth(
+      method = "lm",
+      se = FALSE,
+      linewidth = 1.2
+    ) +
+    labs(
+      title = title_text,
+      subtitle = "Both X and Y are centered within subject",
+      x = "Within-subject deviation in X",
+      y = "Within-subject deviation in Y"
+    ) +
+    theme_bw()
+}
+```
+
+```{r within-plots}
+plot_within_relationship(dat1, "Scenario 1: Within-subject association")
+plot_within_relationship(dat2, "Scenario 2: Within-subject association")
+plot_within_relationship(dat3, "Scenario 3: Within-subject association")
+```
+
+# Plot between-subject relationship
+
+This plot collapses each subject to one point.
+
+```{r between-plot-function}
+plot_between_relationship <- function(dat, title_text) {
+  
+  subject_level <- dat %>%
+    group_by(id) %>%
+    summarize(
+      x_bar = mean(x),
+      y_bar = mean(y),
+      .groups = "drop"
+    )
+  
+  ggplot(subject_level, aes(x = x_bar, y = y_bar)) +
+    geom_point(alpha = 0.65) +
+    geom_smooth(
+      method = "lm",
+      se = FALSE,
+      linewidth = 1.2
+    ) +
+    labs(
+      title = title_text,
+      subtitle = "Each point is one subject's average X and average Y",
+      x = "Subject mean algorithm prediction",
+      y = "Subject mean ground truth"
+    ) +
+    theme_bw()
+}
+```
+
+```{r between-plots}
+plot_between_relationship(dat1, "Scenario 1: Between-subject association")
+plot_between_relationship(dat2, "Scenario 2: Between-subject association")
+plot_between_relationship(dat3, "Scenario 3: Between-subject association")
+```
+
+# Optional: compare unstandardized and standardized effects
+
+This section illustrates why separate standardization changes the question.
+
+```{r standardized-effects-function}
+calculate_standardized_effects <- function(dat, models, scenario_label) {
+  
+  m_wb <- models$within_between
+  beta_B <- fixef(m_wb)["x_bar"]
+  beta_W <- fixef(m_wb)["x_within"]
+  
+  sd_x_bar <- sd(unique(dat[, c("id", "x_bar")])$x_bar)
+  sd_x_within <- sd(dat$x_within)
+  
+  data.frame(
+    scenario = scenario_label,
+    beta_B_raw = beta_B,
+    beta_W_raw = beta_W,
+    sd_x_bar = sd_x_bar,
+    sd_x_within = sd_x_within,
+    beta_B_per_1SD_x_bar = beta_B * sd_x_bar,
+    beta_W_per_1SD_x_within = beta_W * sd_x_within
+  )
+}
+```
+
+```{r standardized-effects}
+standardized_effects <- bind_rows(
+  calculate_standardized_effects(dat1, models1, "1_opposite_direction"),
+  calculate_standardized_effects(dat2, models2, "2_same_direction_different_size"),
+  calculate_standardized_effects(dat3, models3, "3_same_direction_similar_size")
+)
+
+print(standardized_effects)
+```
+
+The raw slopes answer:
+
+> Is one raw unit of $X$ associated with the same change in $Y$ between subjects and within subjects?
+
+The standardized effects answer:
+
+> Is one standard deviation of between-subject $X$ associated with the same change in $Y$ as one standard deviation of within-subject $X$?
+
+These are related but different questions.
+
+# Scenario-specific interpretation
+
+## Scenario 1: Opposite direction
+
+True data-generating values:
+
+$$
+\beta_B = 1.2, \quad \beta_W = -0.8
+$$
+
+This is the most dangerous case. The algorithm may separate high-burden from low-burden subjects, but it may fail to track within-person change correctly, or even track it in the wrong direction.
+
+In this scenario, the pooled model is misleading because it compresses two opposing associations into one coefficient.
+
+## Scenario 2: Same direction, different size
+
+True data-generating values:
+
+$$
+\beta_B = 1.2, \quad \beta_W = 0.3
+$$
+
+Both associations are positive, but the between-subject association is much stronger than the within-subject association.
+
+This means the algorithm may rank subjects well, but it may be less sensitive to within-person change.
+
+The pooled model may be directionally correct, but it hides an important difference between cross-sectional validity and longitudinal tracking validity.
+
+## Scenario 3: Same direction, similar size
+
+True data-generating values:
+
+$$
+\beta_B = 0.8, \quad \beta_W = 0.75
+$$
+
+Here the between-subject and within-subject slopes are similar. If the estimated difference is small and the confidence interval excludes practically meaningful differences, the pooled model may be defensible.
+
+# Practical recommendation
+
+For repeated-measure algorithm validation, a useful workflow is:
+
+1. Fit the within--between model:
+
+$$
+Y_{ij}
+= \beta_0
++ \beta_B \bar X_i
++ \beta_W (X_{ij} - \bar X_i)
++ \gamma t_{ij}
++ b_i
++ \epsilon_{ij}
+$$
+
+2. Report $\hat\beta_B$, $\hat\beta_W$, and $\hat\beta_B - \hat\beta_W$.
+
+3. Use either the reparameterized model or `glht()` to test:
+
+$$
+H_0: \beta_B - \beta_W = 0
+$$
+
+4. Fit the pooled model only if the between and within slopes are sufficiently similar.
+
+5. Do not rely only on a non-significant p-value. Consider the confidence interval and whether the possible difference is practically meaningful for the intended algorithm use.
+
