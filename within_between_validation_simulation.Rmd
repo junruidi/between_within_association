@@ -3,14 +3,14 @@ title: "Within--Between Decomposition for Repeated-Measure Algorithm Validation"
 author: "Junrui"
 date: "`r Sys.Date()`"
 output:
-  pdf_document:
-    toc: true
-    toc_depth: '3'
   html_document:
     toc: true
     toc_depth: 3
     number_sections: true
     theme: readable
+  pdf_document:
+    toc: true
+    toc_depth: '3'
 ---
 
 ```{r setup, include=FALSE}
@@ -118,6 +118,24 @@ H_0: \beta_B - \beta_W = 0
 $$
 
 is meaningful on the original scale.
+
+
+For example, suppose $\hat{\beta}_B = 0.8$ and $\hat{\beta}_W = 0.75$.
+
+This means:
+
+A person whose average predicted score is 1 point higher tends to have a 0.80-point higher average ground truth score.
+
+and,
+
+When the same person’s predicted score is 1 point above their own usual level, their ground truth tends to be 0.75 points higher.
+
+Both are per 1 predicted-score point. So testing the two betas is essentially asking:
+
+Is one algorithm-score point worth the same amount of ground-truth change between people and within the same person?
+
+This is the real question about scaling.
+
 
 Standardizing $\bar X_i$ and $X_{ij} - \bar X_i$ separately would answer a different question:
 
